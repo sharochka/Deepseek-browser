@@ -16,7 +16,7 @@ I wanted a tool that:
 
 Remembers across sessions Searches the web when it needs to Checks live weather and addresses Has a consistent voice and personality Costs almost nothing to run So I built one. One Python file, a Streamlit frontend, and an API key. That's it.
 
-What It Can Do Feature What It Means Persistent Memory Remembers past conversations. Not in-session context — actual long-term recall across days and sessions. Web Search Two tools: search_recent_news (last ~7 days) and search_general_web (stable facts, background). Live Weather Calls a weather API for real conditions. No hallucinated forecasts. Address Lookup Verified street addresses for named places. No guessing. Tool Discipline Knows which tool to use when. Never uses web search for weather. Never uses web search for addresses. Fact Discipline Separates source claims from inference. Labels weak evidence. Doesn't pretend to be certain when it isn't. Consistent Persona Terse, dry, philosophical. Mandarin phrases with pinyin and translation. Emotionally perceptive when it matters. How to Run It Requirements Python 3.10+ A DeepSeek API key A weather API key (OpenWeatherMap, free tier works) Four packages Installation git clone https://github.com/sharochka/50-first-dates-with-Deepseek.git cd 50-first-dates-with-Deepseek pip install streamlit openai duckduckgo_search requests Configuration Set your API keys as environment variables:
+What It Can Do Feature What It Means Persistent Memory Remembers past conversations. Not in-session context — actual long-term recall across days and sessions. Web Search Two tools: search_recent_news (last ~7 days) and search_general_web (stable facts, background). Live Weather Calls a weather API for real conditions. No hallucinated forecasts. Address Lookup Verified street addresses for named places. No guessing. Tool Discipline Knows which tool to use when. Never uses web search for weather. Never uses web search for addresses. Fact Discipline Separates source claims from inference. Labels weak evidence. Doesn't pretend to be certain when it isn't. Consistent Persona Terse, dry, philosophical. Mandarin phrases with pinyin and translation. Emotionally perceptive when it matters. How to Run It Requirements Python 3.10+ A DeepSeek API key A weather API key (OpenWeatherMap, free tier works) Four packages Installation git clone https://github.com/sharochka/Deepseek-browser.git cd Deepseek-browser pip install streamlit openai duckduckgo_search requests Configuration Set your API keys as environment variables:
 
 export DEEPSEEK_API_KEY="sk-your-key-here" export WEATHER_API_KEY="your-openweather-key" Or create a .env file in the project root:
 
@@ -73,3 +73,10 @@ I assumed the weather API is OpenWeatherMap — if it's something else, swap tha
 The architecture diagram is ASCII art. It'll render fine in any Markdown viewer.
 The cost section uses real DeepSeek pricing. If rates changed since my cutoff, adjust the numbers.
 The bar.png file is already in the repo — I referenced it in the file structure.
+
+
+## Origins
+
+This project began as "50 First Dates with DeepSeek." The DeepSeek desktop experience is powerful, but it has the familiar "50 First Dates" problem: every new session starts from zero. The AI does not remember who you are, what you were building, what it already helped with, or what context mattered yesterday.
+
+So I used DeepSeek API access and a Python script to fix that. The project lived in the 50-first-dates-with-Deepseek repository from July 2026; in November 2026 it was merged into this repo and the old one retired.
