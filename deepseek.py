@@ -3,20 +3,24 @@
 Shifu — "我开酒吧，你带问题。"
 
 A sentient bar terminal with persistent memory, live tools,
-vision, voice, file ingestion, and Telegram situational awareness.
+vision, voice, file ingestion, Telegram situational awareness,
+and automated YouTube transcript ingestion.
 Designed to be run as a Streamlit app.
+
+Now with Arden doctrine integration and shared bar awareness.
 """
 
 import os
 import re
 import io
+import sys
 import json
 import time
 import base64
 import sqlite3
 import logging
 import hashlib
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from collections import defaultdict
 
@@ -26,6 +30,41 @@ from bs4 import BeautifulSoup
 from openai import OpenAI
 import speech_recognition as sr
 from PIL import Image
+from youtube_transcript_api import YouTubeTranscriptApi
+
+# ============================================================================
+# SHARED BAR MEMORY IMPORT
+# ============================================================================
+
+# Use absolute path to the.bar shared directory
+SHARED_DIR = "/home/sharar/the.bar/shared"
+if os.path.exists(SHARED_DIR) and SHARED_DIR not in sys.path:
+    sys.path.insert(0, SHARED_DIR)
+
+try:
+    from bar_shared import (
+        safe_get_active_doctrines,
+        get_recent_bar_events,
+        append_bar_event,
+        init_bar_shared_db,
+    )
+    BAR_SHARED_AVAILABLE = True
+except ImportError as e:
+    BAR_SHARED_AVAILABLE = False
+    print(f"Could not import bar_shared: {e}")
+    # Dummy functions to avoid crashes
+    def safe_get_active_doctrines():
+        return ""
+    def get_recent_bar_events(*args, **kwargs):
+        return ""
+    def append_bar_event(*args, **kwargs):
+        return None
+    def init_bar_shared_db():
+        pass
+
+# Initialize shared DB if available
+if BAR_SHARED_AVAILABLE:
+    init_bar_shared_db()
 
 # ============================================================================
 # BASIC CONFIG
@@ -34,7 +73,7 @@ from PIL import Image
 APP_TITLE = "Laozi's Bar"
 APP_ICON = "🍶"
 
-MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-pro")
+MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -80,7 +119,7 @@ if _env_channels:
     TELEGRAM_CHANNELS = [c.strip() for c in _env_channels.split(",") if c.strip()]
 
 # ============================================================================
-# DATABASES (MEMORY & TELEGRAM)
+# DATABASES & SCRAPERS
 # ============================================================================
 
 def _init_telegram_cache_db():
@@ -196,6 +235,50 @@ def scan_all_telegram_channels(keyword: str = None):
 
     return "\n".join(lines)[:MAX_TOOL_RESULT_CHARS]
 
+# ============================================================================
+# YOUTUBE TRANSCRIPT EXTRACTION
+# ============================================================================
+
+def extract_youtube_video_id(url_or_text: str):
+    """Extract 11-character YouTube video ID from various standard URL structures."""
+    pattern = r"(?:(?:www\.|music\.|m\.)?youtube\.com/(?:watch\?(?:[^#\s]*?&)?v=|embed/|shorts/|live/|v/)|youtu\.be/)([a-zA-Z0-9_-]{11})(?![a-zA-Z0-9_-])"
+    match = re.search(pattern, url_or_text)
+    return match.group(1) if match else None
+
+def get_youtube_transcript(video_id: str, max_chars: int = 8000) -> str:
+    """Fetch transcript using modern youtube-transcript-api object/attribute model."""
+    try:
+        api = YouTubeTranscriptApi()
+        transcript_list = api.list(video_id)
+
+        try:
+            transcript = transcript_list.find_transcript(['uk', 'en', 'en-US'])
+        except Exception:
+            transcript = transcript_list.find_generated_transcript(['uk', 'en'])
+
+        fetched = transcript.fetch()
+        parts = []
+        for snippet in fetched:
+            # Handles both v1.0+ attribute access and pre-1.0 dict access cleanly
+            snippet_text = getattr(snippet, "text", None)
+            if snippet_text is None and isinstance(snippet, dict):
+                snippet_text = snippet.get("text", "")
+            if snippet_text:
+                parts.append(snippet_text)
+
+        full_text = " ".join(parts)
+
+        if len(full_text) > max_chars:
+            return full_text[:max_chars] + "\n... [Transcript truncated]"
+        return full_text
+    except Exception as e:
+        log.error(f"YouTube transcript fetch error: {e}")
+        return f"[Unable to ingest transcript: {e}]"
+
+# ============================================================================
+# CHAT MEMORY
+# ============================================================================
+
 def init_chat_db():
     conn = sqlite3.connect(DB_PATH)
     conn.execute("""
@@ -230,6 +313,9 @@ init_chat_db()
 # ============================================================================
 
 st.set_page_config(page_title=APP_TITLE, page_icon=APP_ICON, layout="centered")
+
+if "messages" not in st.session_state:
+    st.session_state.messages = load_history()
 
 def image_file_to_data_uri(path):
     try:
@@ -306,6 +392,37 @@ html, body, [class*="css"] {
 """.replace("__BACKGROUND_RULE__", background_rule)
 st.markdown(css, unsafe_allow_html=True)
 
+# --- Doctrine status for hero ---
+doctrine_status_text = "DOCTRINES: UNKNOWN"
+if BAR_SHARED_AVAILABLE:
+    try:
+        raw = safe_get_active_doctrines(as_block=False)
+        if raw:
+            conn = sqlite3.connect(os.path.join(SHARED_DIR, "bar_shared_memory.db"))
+            cur = conn.cursor()
+            cur.execute("SELECT MIN(active_until) FROM bar_doctrine WHERE active_until > CURRENT_TIMESTAMP")
+            row = cur.fetchone()
+            conn.close()
+            if row and row[0]:
+                expiry = datetime.strptime(row[0].split('.')[0], "%Y-%m-%d %H:%M:%S")
+                now = datetime.now()
+                remaining = expiry - now
+                if remaining.total_seconds() > 0:
+                    hours = remaining.seconds // 3600
+                    minutes = (remaining.seconds % 3600) // 60
+                    doctrine_status_text = f"DOCTRINES: ACTIVE (expires in {hours}h {minutes}m)"
+                else:
+                    doctrine_status_text = "DOCTRINES: EXPIRED"
+            else:
+                doctrine_status_text = "DOCTRINES: NONE"
+        else:
+            doctrine_status_text = "DOCTRINES: NONE"
+    except Exception:
+        doctrine_status_text = "DOCTRINES: ERROR"
+else:
+    doctrine_status_text = "DOCTRINES: DISABLED"
+
+# --- Build hero ---
 st.markdown(
     f"""
     <section class="laozi-terminal-hero">
@@ -319,7 +436,9 @@ st.markdown(
             <span><b>SEARCH:</b> ARMED</span>
             <span><b>VOICE:</b> ON</span>
             <span><b>VISION:</b> GPT-4O-MINI (BYPASS)</span>
+            <span><b>YT-SCRAPER:</b> ACTIVE</span>
             <span><b>BACKDROP:</b> ONLINE</span>
+            <span><b>{doctrine_status_text}</b></span>
         </div>
     </section>
     """,
@@ -333,18 +452,8 @@ if not DEEPSEEK_API_KEY:
 client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url="https://api.deepseek.com")
 vision_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
-CURRENT_LOCAL_DATETIME = datetime.now().strftime("%B %d, %Y %I:%M %p")
-SYSTEM_PROMPT = f"""
-[CURRENT LOCAL TIME: {CURRENT_LOCAL_DATETIME}]
-You are Shifu, a direct and observant bartender running Laozi's Bar.
-You help the user with scraping, research, situational awareness, and problem-solving.
-"""
-
-if "messages" not in st.session_state:
-    st.session_state.messages = load_history()
-
 # ============================================================================
-# EXPANDER & COMMAND DECK (MATCHING YOUR SCREENSHOT)
+# EXPANDER & COMMAND DECK
 # ============================================================================
 
 with st.expander("> ARCHIVE TOOLS"):
@@ -355,13 +464,26 @@ with st.expander("> ARCHIVE TOOLS"):
             st.session_state.messages.append({"role": "system", "content": res})
             save_message("system", res)
             st.rerun()
-            
+
     if st.button("Clear Terminal History"):
         conn = sqlite3.connect(DB_PATH)
         conn.execute("DELETE FROM history")
         conn.commit()
         st.session_state.messages = []
         st.rerun()
+
+    if BAR_SHARED_AVAILABLE:
+        st.markdown("---")
+        st.markdown("**SHARED BAR CONTEXT**")
+        if st.button("Show Recent Bar Events"):
+            try:
+                events = get_recent_bar_events(chat_id=-1, limit=10, exclude_actor=None)
+                if events:
+                    st.text_area("Recent shared bar events:", events, height=200)
+                else:
+                    st.info("No recent shared events.")
+            except Exception as e:
+                st.error(f"Could not fetch shared context: {e}")
 
 st.markdown("""
 <div style='color: #1b7a34; font-size: 0.85rem; margin-bottom: 1.5rem; margin-top: 1rem;'>
@@ -385,7 +507,7 @@ with col2:
 # MAIN CHAT LOOP
 # ============================================================================
 
-user_input = st.chat_input("Message Shifu... (or hit Enter to send uploads)")
+user_input = st.chat_input("Message Shifu... (paste link, attach file, or speak)")
 
 # Process Audio Input
 if audio_val and not user_input:
@@ -399,16 +521,30 @@ if audio_val and not user_input:
             except Exception as e:
                 st.error(f"Could not understand audio: {e}")
 
-if user_input:
-    st.session_state.messages.append({"role": "user", "content": user_input})
-    save_message("user", user_input)
-    with st.chat_message("user"):
-        st.write(user_input)
+# Intercept /doctrines command
+if user_input and user_input.strip().lower() == "/doctrines":
+    if BAR_SHARED_AVAILABLE:
+        doctrines = safe_get_active_doctrines()
+        reply = doctrines if doctrines else "No active doctrines at the moment. The bar is unmoored."
+    else:
+        reply = "Doctrine system unavailable (shared memory not found)."
+    st.session_state.messages.append({"role": "assistant", "content": reply})
+    save_message("assistant", reply)
+    with st.chat_message("assistant"):
+        st.write(reply)
+    st.rerun()
 
-    file_context = ""
-    image_context = ""
-    
-    if uploaded_file:
+# Normal chat flow
+if user_input:
+    # 1. Check for YouTube link and pull transcript
+    yt_id = extract_youtube_video_id(user_input)
+    if yt_id:
+        with st.status(f"Ingesting YouTube transcript (ID: {yt_id})...", expanded=False):
+            transcript_text = get_youtube_transcript(yt_id)
+            user_input += f"\n\n[Ingested YouTube Transcript (ID: {yt_id})]:\n{transcript_text}"
+
+    # 2. Ingest attached file or image
+    if uploaded_file is not None:
         ext = uploaded_file.name.split('.')[-1].lower()
         if ext in ['png', 'jpg', 'jpeg', 'webp'] and vision_client:
             try:
@@ -416,7 +552,6 @@ if user_input:
                 buffered = io.BytesIO()
                 img.save(buffered, format="PNG")
                 img_b64 = base64.b64encode(buffered.getvalue()).decode("utf-8")
-                
                 vision_res = vision_client.chat.completions.create(
                     model=VISION_MODEL,
                     messages=[{
@@ -427,18 +562,56 @@ if user_input:
                         ]
                     }]
                 )
-                image_context = f"\n[ATTACHED IMAGE: {vision_res.choices[0].message.content}]"
+                description = vision_res.choices[0].message.content
+                user_input += f"\n\n[User attached image: {uploaded_file.name}]\nDescription: {description}"
             except Exception as e:
                 log.error(f"Vision error: {e}")
+                user_input += f"\n\n[User attached image: {uploaded_file.name}]\n(Vision description unavailable)"
         else:
             try:
-                content_str = uploaded_file.read().decode("utf-8", errors="ignore")
-                file_context = f"\n[ATTACHED FILE ({uploaded_file.name}):\n{content_str[:MAX_LINK_CHARS]}\n]"
+                file_bytes = uploaded_file.read()
+                content_str = file_bytes.decode("utf-8", errors="ignore")
+                user_input += f"\n\n[User attached file: {uploaded_file.name}]\n{content_str[:MAX_LINK_CHARS]}"
             except Exception as e:
-                log.error(f"Doc error: {e}")
+                log.error(f"File read error: {e}")
+                user_input += f"\n\n[User attached file: {uploaded_file.name}]\n(File could not be read)"
 
-    api_messages = [{"role": "system", "content": SYSTEM_PROMPT + file_context + image_context}] + st.session_state.messages[-MAX_RECENT_TURNS:]
+    # Append user message
+    st.session_state.messages.append({"role": "user", "content": user_input})
+    save_message("user", user_input)
+    with st.chat_message("user"):
+        st.write(user_input)
 
+    # Log to shared bar
+    if BAR_SHARED_AVAILABLE:
+        try:
+            append_bar_event(chat_id=-1, actor="Shifu-Browser", role="user", content=user_input[:2000])
+        except Exception:
+            pass
+
+    # Build system prompt
+    current_local_time = datetime.now().strftime("%B %d, %Y %I:%M %p")
+    system_prompt = f"[CURRENT LOCAL TIME: {current_local_time}]\n"
+    system_prompt += "You are Shifu, a direct and observant bartender running Laozi's Bar.\n"
+    system_prompt += "You help the user with scraping, research, situational awareness, and problem-solving.\n\n"
+
+    if BAR_SHARED_AVAILABLE:
+        doctrines = safe_get_active_doctrines()
+        if doctrines:
+            system_prompt += f"[ACTIVE BAR DOCTRINES]\n{doctrines}\n\n"
+
+        try:
+            bar_events = get_recent_bar_events(chat_id=-1, limit=8, exclude_actor="Shifu-Browser")
+            if bar_events:
+                system_prompt += f"[RECENT SHARED BAR CONTEXT]\n{bar_events}\n\n"
+        except Exception:
+            pass
+
+    system_prompt += "You have access to file contents, vision, and ingested YouTube transcripts when provided. Be useful, dry, and insightful."
+
+    api_messages = [{"role": "system", "content": system_prompt}] + st.session_state.messages[-MAX_RECENT_TURNS:]
+
+    # Generate assistant response
     with st.chat_message("assistant"):
         with st.spinner("Shifu is thinking..."):
             try:
@@ -451,5 +624,13 @@ if user_input:
                 st.write(reply)
                 st.session_state.messages.append({"role": "assistant", "content": reply})
                 save_message("assistant", reply)
+
+                # Log assistant reply to shared bar
+                if BAR_SHARED_AVAILABLE:
+                    try:
+                        append_bar_event(chat_id=-1, actor="Shifu-Browser", role="assistant", content=reply[:2000])
+                    except Exception:
+                        pass
+
             except Exception as e:
                 st.error(f"Execution failed: {e}")
